@@ -6,9 +6,13 @@ import threading
 from queue import Queue
 import time
 from flask import Flask, render_template, Response
+import sqlite
 
 app = Flask(__name__)
 global fvs
+
+# set last detection time
+last_detection_time = datetime.datetime.utcnow() - datetime.timedelta(minutes=60)
 
 @app.route("/")
 def index():
@@ -84,7 +88,7 @@ def load_yolo():
 
 
 def start_video():
-    fvs = FileVideoStream('rtsp://administrator:123456@192.168.1.126:554/stream1').start()
+    fvs = FileVideoStream('rtsp://administrator:123456@192.168.1.133:554/stream1').start()
     time.sleep(1.0)
     return fvs
 
@@ -94,10 +98,13 @@ def start_video():
 # catch frames
 def generate():
     # global fvs
+    people_count = 0
     fvs = start_video()
     net, layer_names, colors, labels = load_yolo()
+    total_people = 0
     while True:
         frame = fvs.read()
+        frame = cv2.resize(frame, (1280, 720))
 
 
         # if weight is None or height is None:
@@ -117,7 +124,6 @@ def generate():
         bounding_boxes = []
         confidences = []
         classes = []
-
         for out in network_output:
             for detected_obj in out:
                 scores = detected_obj[5:]
@@ -125,6 +131,13 @@ def generate():
                 current_confidence = scores[current_class]
 
                 if current_confidence > 0.5:
+                    # if labels[current_class] == 'person':
+                    #     # people_count += 1
+                    #     t = time.localtime()
+                    #     current_time = time.strftime("%H:%M:%S", t)
+                    #     sqlite.insert_variable_into_table(current_time, 1)
+                    # print("people count: ")
+                    # print(people_count)
                     current_box = detected_obj[0:4] * np.array([weight, height, weight, height])
                     x_center, y_center, box_w, box_h = current_box
                     x_min = int(x_center - (box_w/2))
@@ -135,11 +148,11 @@ def generate():
                     confidences.append(float(current_confidence))
                     classes.append(current_class)
 
-        results = cv2.dnn.NMSBoxes(bounding_boxes, confidences, 0.5, 0.)
-
+        results = np.array(cv2.dnn.NMSBoxes(bounding_boxes, confidences, 0.5, 0.))
+        results = [r for r in results.flatten() if labels[classes[r]] == 'person']
         # At least one detection should exist
         if len(results) > 0:
-            for i in results.flatten():
+            for i in results:
                 # get box coordinates
                 x_min, y_min = bounding_boxes[i][0], bounding_boxes[i][1]
                 box_w, box_h = bounding_boxes[i][2], bounding_boxes[i][3]
@@ -154,96 +167,26 @@ def generate():
                 current_text_box = '{}: {:.4f}'.format(labels[int(classes[i])], confidences[i])
                 cv2.putText(frame, current_text_box, (x_min, y_min - 5), cv2.FONT_HERSHEY_COMPLEX, 0.7, color_current_box, 2)
 
+            global last_detection_time
+            t = datetime.datetime.utcnow()
+            minute = t.minute
+            if minute == 0:
+                total_people = 0
+            if t - datetime.timedelta(minutes=1) > last_detection_time:
+                sqlite.insert_variable_into_table(t, len(results))
+                last_detection_time = t
+                total_people += 1
+                print(total_people)
+
+
         (flag, encodedImage) = cv2.imencode(".jpg", frame)
         yield (b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + bytearray(encodedImage) + b'\r\n')
-        # cv2.imshow("preview", frame)
-        # key = cv2.waitKey(20)
-        # if key == 27: # exit on ESC
-        #     fvs.stop()
-        #     break
 
 
-# while rval:
-#     cv2.imshow("preview", frame)
-#     rval, frame = vc.read()
-#     # detect_objects(frame)
-#     key = cv2.waitKey(20)
-#     if key == 27: # exit on ESC
-#         break
-# cv2.destroyWindow("preview")
 
-# # catch frames
-# while True:
-#     rval, frame = vc.read()
-#     if not rval:
-#         break
-#
-#
-#
-#     if weight is None or height is None:
-#         height, weight = frame.shape[:2]
-#
-#     # process frame
-#     blob = cv2.dnn.blobFromImage(frame, 1/255.0, (416, 416), swapRB=True, crop=False)
-#
-#
-#     # YOLO forward step
-#     net.setInput(blob)
-#
-#     # get associated probability
-#     network_output = net.forward(layer_names)
-#
-#     # prepare lists
-#     bounding_boxes = []
-#     confidences = []
-#     classes = []
-#
-#     for out in network_output:
-#         for detected_obj in out:
-#             scores = detected_obj[5:]
-#             current_class = np.argmax(scores)
-#             current_confidence = scores[current_class]
-#
-#             if current_confidence > 0.5:
-#                 current_box = detected_obj[0:4] * np.array([weight, height, weight, height])
-#                 x_center, y_center, box_w, box_h = current_box
-#                 x_min = int(x_center - (box_w/2))
-#                 y_min = int(y_center - (box_h/2))
-#
-#                 # Append results
-#                 bounding_boxes.append([x_min, y_min, int(box_w), int(box_h)])
-#                 confidences.append(float(current_confidence))
-#                 classes.append(current_class)
-#
-#     results = cv2.dnn.NMSBoxes(bounding_boxes, confidences, 0.5, 0.)
-#
-#     # At least one detection should exist
-#     if len(results) > 0:
-#         for i in results.flatten():
-#             # get box coordinates
-#             x_min, y_min = bounding_boxes[i][0], bounding_boxes[i][1]
-#             box_w, box_h = bounding_boxes[i][2], bounding_boxes[i][3]
-#
-#             # get a color
-#             color_current_box = colors[classes[i]].tolist()
-#
-#             # draw box
-#             cv2.rectangle(frame, (x_min, y_min), (x_min + box_w, y_min + box_h), color_current_box, 2)
-#
-#             # text label
-#             current_text_box = '{}: {:.4f}'.format(labels[int(classes[i])], confidences[i])
-#             cv2.putText(frame, current_text_box, (x_min, y_min - 5), cv2.FONT_HERSHEY_COMPLEX, 0.7, color_current_box, 2)
-#
-#
-#     cv2.imshow("preview", frame)
-#     key = cv2.waitKey(20)
-#     if key == 27: # exit on ESC
-#         break
-#
-# if __name__ == 'main':
 t = threading.Thread(target=start_video)
 t.daemon = True
 t.start()
 app.run(host="127.0.0.1", port=8000, debug=True, threaded=True, use_reloader=False)
 
-# fvs.stop()
+
